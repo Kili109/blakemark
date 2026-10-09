@@ -764,17 +764,62 @@ const LIMITS: Record<ChartPayload["interval"], number> = {
   "1d": 90,
 };
 
+const STEP_SEC: Record<ChartPayload["interval"], number> = {
+  "15m": 15 * 60,
+  "1h": 60 * 60,
+  "4h": 4 * 60 * 60,
+  "1d": 24 * 60 * 60,
+};
+
+/** Same clock for every quote. Quiet buckets keep the last price, so a gap cannot shift the window. */
+function onTheClock(
+  raw: Candle[],
+  interval: ChartPayload["interval"],
+): { from: number; to: number; candles: Candle[] } {
+  const step = STEP_SEC[interval];
+  const bars = LIMITS[interval];
+  const end = Math.floor(Date.now() / 1000 / step) * step;
+  const start = end - (bars - 1) * step;
+  const byTime = new Map<number, Candle>();
+  for (const candle of raw) {
+    const bucket = Math.floor(candle.t / 1000 / step) * step;
+    byTime.set(bucket, candle);
+  }
+  let carry: number | null = null;
+  for (const candle of raw) {
+    if (candle.t / 1000 <= start) carry = candle.c;
+  }
+  const candles: Candle[] = [];
+  let started = carry != null;
+  for (let t = start; t <= end; t += step) {
+    const hit = byTime.get(t);
+    if (hit) {
+      started = true;
+      carry = hit.c;
+      candles.push({ ...hit, t: t * 1000 });
+    } else if (started && carry != null) {
+      candles.push({ t: t * 1000, o: carry, h: carry, l: carry, c: carry, v: 0 });
+    }
+  }
+  const span = (end - start) * 1000;
+  const first = candles[0]?.t ?? start * 1000;
+  // A young book should fill the card, not sit on the right of a long empty window.
+  const from = first - start * 1000 > span / 2 ? first : start * 1000;
+  return { from, to: end * 1000, candles };
+}
+
 export async function loadChart(quote: QuoteCcy, interval: ChartPayload["interval"]): Promise<ChartPayload> {
   const key = `${quote}:${interval}`;
   const hit = chartCache.get(key);
   if (hit && Date.now() - hit.at < 60_000) return hit.data;
   const pair = `BTCB2_${quote}`;
+  const fetchLimit = Math.min(LIMITS[interval] * 8, 800);
   const body = rec(
     await getJson(
-      `https://neoxa.exchange/api/exchange/candles/${pair}?interval=${interval}&limit=${LIMITS[interval]}`,
+      `https://neoxa.exchange/api/exchange/candles/${pair}?interval=${interval}&limit=${fetchLimit}`,
     ),
   );
-  const candles: Candle[] = arr(body?.candles)
+  const raw: Candle[] = arr(body?.candles)
     .map((item) => {
       const row = rec(item);
       const t = num(row?.time);
@@ -786,14 +831,18 @@ export async function loadChart(quote: QuoteCcy, interval: ChartPayload["interva
       if (t == null || o == null || h == null || l == null || c == null) return null;
       return { t: t * 1000, o, h, l, c, v };
     })
-    .filter((c): c is Candle => c != null);
+    .filter((c): c is Candle => c != null)
+    .sort((a, b) => a.t - b.t);
 
+  const clock = onTheClock(raw, interval);
   const data: ChartPayload = {
     quote,
     interval,
     pairLabel: `XBT/${quote}`,
     source: "Neoxa",
-    candles,
+    from: clock.from,
+    to: clock.to,
+    candles: clock.candles,
   };
   chartCache.set(key, { at: Date.now(), data });
   return data;

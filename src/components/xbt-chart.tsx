@@ -1,12 +1,18 @@
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts";
+import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { getXbtChart } from "@/lib/market/board.functions";
 import { formatPlain, formatUsd } from "@/lib/market/format";
 import type { QuoteCcy } from "@/lib/market/types";
 
 const QUOTES: QuoteCcy[] = ["USDC", "USDT", "BTC"];
 const INTERVALS = ["15m", "1h", "4h", "1d"] as const;
+const WINDOW_LABEL: Record<(typeof INTERVALS)[number], string> = {
+  "15m": "last 24 hours",
+  "1h": "last 3 days",
+  "4h": "last 8 days",
+  "1d": "daily",
+};
 
 function formatAxisTime(ms: number, interval: (typeof INTERVALS)[number]): string {
   if (interval === "1d") {
@@ -49,8 +55,7 @@ export function XbtChart() {
       <div>
         <h2 className="font-display text-xl text-fg">Neoxa tape</h2>
         <p className="mt-1 text-sm text-muted">
-          {query.data ? `${query.data.pairLabel} · ${query.data.source}` : "XBT candles"}
-          {" · "}Pick a currency, then how far back to look. NonKYC has no chart here.
+          {query.data ? `${query.data.pairLabel} · Neoxa` : "Neoxa XBT"} · {WINDOW_LABEL[interval]}
         </p>
       </div>
       <div className="mt-4 grid gap-2">
@@ -96,6 +101,13 @@ export function XbtChart() {
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={candles} margin={{ top: 8, right: 0, left: 0, bottom: 0 }}>
+              <XAxis
+                dataKey="t"
+                type="number"
+                scale="time"
+                domain={[query.data?.from ?? "dataMin", query.data?.to ?? "dataMax"]}
+                hide
+              />
               <YAxis hide domain={["auto", "auto"]} />
               <Tooltip
                 cursor={{ stroke: "var(--color-line)" }}

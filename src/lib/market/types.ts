@@ -94,5 +94,7 @@ export type ChartPayload = {
   interval: "15m" | "1h" | "4h" | "1d";
   pairLabel: string;
   source: string;
+  from: number;
+  to: number;
   candles: Candle[];
 };

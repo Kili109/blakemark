@@ -21,7 +21,7 @@ const SPANS: Array<{ id: CompareSpan; label: string }> = [
   { id: "1m", label: "1m" },
 ];
 
-type SortKey = "listed" | "day" | "lead";
+type SortKey = "day" | "lead";
 
 export function Desk() {
   const board = useQuery({
@@ -341,7 +341,7 @@ function Books({ books }: { books: XbtBook[] }) {
 function Compare({ data }: { data: Board }) {
   const [kind, setKind] = useState<AssetKind>("tech");
   const [span, setSpan] = useState<CompareSpan>("24h");
-  const [sort, setSort] = useState<SortKey>("listed");
+  const [sort, setSort] = useState<SortKey>("day");
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   const xbt = data.mark.equalUsd;
@@ -427,7 +427,6 @@ function Compare({ data }: { data: Board }) {
         <div className="flex rounded-full bg-raised p-1" role="group" aria-label="Sort">
           {(
             [
-              ["listed", "Listed"],
               ["day", span],
               ["lead", "vs XBT"],
             ] as const
