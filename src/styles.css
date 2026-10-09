@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --color-bg: #14120e;
+  --color-surface: #1e1b16;
+  --color-raised: #2a251e;
+  --color-fg: #f3eee4;
+  --color-muted: #a89b8a;
+  --color-line: #3a342b;
+  --color-accent: #e39b3a;
+  --color-up: #8fbf96;
+  --color-down: #e08a74;
+  --radius-lg: 1.25rem;
+}
+
+html[data-theme="light"] {
+  --color-bg: #f4efe6;
+  --color-surface: #fffaf3;
+  --color-raised: #efe6d6;
+  --color-fg: #1c1814;
+  --color-muted: #6d6256;
+  --color-line: #e0d4c2;
+  --color-accent: #9a5b12;
+  --color-up: #1f7a45;
+  --color-down: #b42318;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
