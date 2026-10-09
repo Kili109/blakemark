@@ -17,3 +17,4 @@ Open it on the phone. If Android asks, allow install from the browser or files a
 ```bash
 npm install
 npm run dev
+```
