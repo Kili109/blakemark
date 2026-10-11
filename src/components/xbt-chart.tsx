@@ -53,9 +53,9 @@ export function XbtChart() {
   return (
     <section className="rounded-2xl border border-line bg-surface p-4">
       <div>
-        <h2 className="font-display text-xl text-fg">Neoxa tape</h2>
+        <h2 className="font-display text-xl text-fg">Tape</h2>
         <p className="mt-1 text-sm text-muted">
-          {query.data ? `${query.data.pairLabel} · Neoxa` : "Neoxa XBT"} · {WINDOW_LABEL[interval]}
+          {query.data ? `${query.data.pairLabel} · ${query.data.source}` : "XBT"} · {WINDOW_LABEL[interval]}
         </p>
       </div>
       <div className="mt-4 grid gap-2">

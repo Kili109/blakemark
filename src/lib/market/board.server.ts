@@ -808,18 +808,15 @@ function onTheClock(
   return { from, to: end * 1000, candles };
 }
 
-export async function loadChart(quote: QuoteCcy, interval: ChartPayload["interval"]): Promise<ChartPayload> {
-  const key = `${quote}:${interval}`;
-  const hit = chartCache.get(key);
-  if (hit && Date.now() - hit.at < 60_000) return hit.data;
-  const pair = `BTCB2_${quote}`;
-  const fetchLimit = Math.min(LIMITS[interval] * 8, 800);
-  const body = rec(
-    await getJson(
-      `https://neoxa.exchange/api/exchange/candles/${pair}?interval=${interval}&limit=${fetchLimit}`,
-    ),
-  );
-  const raw: Candle[] = arr(body?.candles)
+const NK_RES: Record<ChartPayload["interval"], string> = {
+  "15m": "15",
+  "1h": "60",
+  "4h": "240",
+  "1d": "1440",
+};
+
+function candleRows(items: unknown[], timeInMs: boolean): Candle[] {
+  return items
     .map((item) => {
       const row = rec(item);
       const t = num(row?.time);
@@ -829,17 +826,49 @@ export async function loadChart(quote: QuoteCcy, interval: ChartPayload["interva
       const c = num(row?.close);
       const v = num(row?.volume) ?? 0;
       if (t == null || o == null || h == null || l == null || c == null) return null;
-      return { t: t * 1000, o, h, l, c, v };
+      return { t: timeInMs ? t : t * 1000, o, h, l, c, v };
     })
     .filter((c): c is Candle => c != null)
     .sort((a, b) => a.t - b.t);
+}
+
+export async function loadChart(quote: QuoteCcy, interval: ChartPayload["interval"]): Promise<ChartPayload> {
+  const key = `${quote}:${interval}`;
+  const hit = chartCache.get(key);
+  if (hit && Date.now() - hit.at < 60_000) return hit.data;
+
+  let source = "Neoxa";
+  let pairLabel = `XBT/${quote}`;
+  let raw: Candle[] = [];
+
+  if (quote === "USDT") {
+    const step = STEP_SEC[interval];
+    const end = Math.floor(Date.now() / 1000 / step) * step;
+    const start = end - (LIMITS[interval] - 1) * step;
+    const body = rec(
+      await getJson(
+        `https://api.nonkyc.io/api/v2/market/candles?symbol=BTCB2_USDT&resolution=${NK_RES[interval]}&from=${start - step * 2}&to=${Math.floor(Date.now() / 1000)}`,
+      ),
+    );
+    source = "NonKYC";
+    pairLabel = "BTCB2/USDT";
+    raw = candleRows(arr(body?.bars), true);
+  } else {
+    const fetchLimit = Math.min(LIMITS[interval] * 8, 800);
+    const body = rec(
+      await getJson(
+        `https://neoxa.exchange/api/exchange/candles/BTCB2_${quote}?interval=${interval}&limit=${fetchLimit}`,
+      ),
+    );
+    raw = candleRows(arr(body?.candles), false);
+  }
 
   const clock = onTheClock(raw, interval);
   const data: ChartPayload = {
     quote,
     interval,
-    pairLabel: `XBT/${quote}`,
-    source: "Neoxa",
+    pairLabel,
+    source,
     from: clock.from,
     to: clock.to,
     candles: clock.candles,
