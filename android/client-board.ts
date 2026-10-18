@@ -1,8 +1,12 @@
-import { loadBoard, loadChart } from "../src/lib/market/board.server";
+import { loadBoard, loadChart, loadMarkHistory } from "../src/lib/market/board.server";
 import type { QuoteCcy } from "../src/lib/market/types";
 
 export function getBoard() {
   return loadBoard();
+}
+
+export function getMarkHistory() {
+  return loadMarkHistory();
 }
 
 export function getXbtChart(input: {

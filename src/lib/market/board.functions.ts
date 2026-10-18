@@ -6,6 +6,11 @@ export const getBoard = createServerFn({ method: "GET" }).handler(async () => {
   return loadBoard();
 });
 
+export const getMarkHistory = createServerFn({ method: "GET" }).handler(async () => {
+  const { loadMarkHistory } = await import("./board.server");
+  return loadMarkHistory();
+});
+
 export const getXbtChart = createServerFn({ method: "GET" })
   .validator(
     z.object({

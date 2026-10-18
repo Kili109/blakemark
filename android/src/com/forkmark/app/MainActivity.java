@@ -78,7 +78,7 @@ public class MainActivity extends Activity {
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView popupView, WebResourceRequest request) {
                         Uri target = request.getUrl();
-                        if ("here".equals(prefs.getString("links", "browser"))) {
+                        if ("here".equals(prefs.getString("links", "here"))) {
                             if (target != null) webView.loadUrl(target.toString());
                         } else {
                             openOutside(target);
@@ -101,7 +101,7 @@ public class MainActivity extends Activity {
         if (uri == null || APP_HOST.equals(uri.getHost())) return false;
         String scheme = uri.getScheme();
         if (!"https".equals(scheme) && !"http".equals(scheme)) return false;
-        String mode = prefs.getString("links", "browser");
+        String mode = prefs.getString("links", "here");
         if ("here".equals(mode)) return false;
         if ("app".equals(mode) && openExchangeApp(uri)) return true;
         Intent intent = new Intent(Intent.ACTION_VIEW, uri);

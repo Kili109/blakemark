@@ -6,6 +6,7 @@ import type {
   Candle,
   ChartPayload,
   CompareSpan,
+  MarkHistory,
   QuoteCcy,
   VenuePrint,
   XbtBook,
@@ -158,6 +159,61 @@ async function kraken(pair: string): Promise<Print | null> {
   return { name: "Kraken", price: last, changePct };
 }
 
+async function krakenMany(pairs: Array<{ ticker: string; pair: string }>): Promise<Array<{ ticker: string; print: Print }>> {
+  const body = rec(await getJson(`https://api.kraken.com/0/public/Ticker?pair=${pairs.map((item) => item.pair).join(",")}`));
+  const result = rec(body?.result);
+  if (!result) return [];
+  const alias: Record<string, string> = {
+    XXBTZUSD: "BTC",
+    XBTUSD: "BTC",
+    XETHZUSD: "ETH",
+    ETHUSD: "ETH",
+    SOLUSD: "SOL",
+    XXRPZUSD: "XRP",
+    XRPUSD: "XRP",
+    BNBUSD: "BNB",
+    ADAUSD: "ADA",
+    XXMRZUSD: "XMR",
+    XMRUSD: "XMR",
+    BCHUSD: "BCH",
+  };
+  const out: Array<{ ticker: string; print: Print }> = [];
+  for (const [key, value] of Object.entries(result)) {
+    const ticker = alias[key];
+    const row = rec(value);
+    if (!ticker || !row) continue;
+    const last = Array.isArray(row.c) ? num(row.c[0]) : null;
+    const open = num(row.o);
+    if (last == null) continue;
+    const changePct = open && open > 0 ? ((last - open) / open) * 100 : null;
+    out.push({ ticker, print: { name: "Kraken", price: last, changePct } });
+  }
+  return out;
+}
+
+const BITSTAMP: Record<string, string> = {
+  "BTC/USD": "BTC",
+  "ETH/USD": "ETH",
+  "SOL/USD": "SOL",
+  "XRP/USD": "XRP",
+  "BNB/USD": "BNB",
+  "ADA/USD": "ADA",
+  "BCH/USD": "BCH",
+};
+
+async function bitstamp(): Promise<Array<{ ticker: string; print: Print }>> {
+  const list = arr(await getJson("https://www.bitstamp.net/api/v2/ticker/"));
+  const out: Array<{ ticker: string; print: Print }> = [];
+  for (const item of list) {
+    const row = rec(item);
+    const ticker = typeof row?.pair === "string" ? BITSTAMP[row.pair] : undefined;
+    const last = num(row?.last);
+    if (!ticker || last == null) continue;
+    out.push({ ticker, print: { name: "Bitstamp", price: last, changePct: num(row?.percent_change_24) } });
+  }
+  return out;
+}
+
 async function coinbase(product: string): Promise<Print | null> {
   const row = rec(await getJson(`https://api.exchange.coinbase.com/products/${product}/stats`));
   const last = num(row?.last);
@@ -195,7 +251,14 @@ function cautionFor(venues: number, spreadPct: number | null, threshold: number,
   return bits.length ? bits.join(" ") : null;
 }
 
-type YahooPoint = { price: number | null; changePct: number | null; spark: number[]; weekPct: number | null; monthPct: number | null };
+type YahooPoint = {
+  price: number | null;
+  changePct: number | null;
+  spark: number[];
+  daily: Array<{ t: number; c: number }>;
+  weekPct: number | null;
+  monthPct: number | null;
+};
 
 function changeOver(points: Array<{ t: number; c: number }>, days: number, nowPrice?: number): number | null {
   if (!points.length) return null;
@@ -214,6 +277,17 @@ function changeOver(points: Array<{ t: number; c: number }>, days: number, nowPr
 
 function changesFor(day: number | null, week: number | null, month: number | null): Record<CompareSpan, number | null> {
   return { "24h": day, "1w": week, "1m": month };
+}
+
+function dailyCloses(points: Array<{ t: number; c: number }>): Array<{ t: number; c: number }> {
+  const map = new Map<number, number>();
+  for (const point of points) {
+    if (point.c <= 0) continue;
+    const ms = point.t > 1e12 ? point.t : point.t * 1000;
+    const day = new Date(ms);
+    map.set(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()), point.c);
+  }
+  return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([t, c]) => ({ t, c }));
 }
 
 async function loadYahoo(symbols: string[]): Promise<Map<string, YahooPoint>> {
@@ -243,6 +317,7 @@ async function loadYahoo(symbols: string[]): Promise<Map<string, YahooPoint>> {
       price: num(meta?.regularMarketPrice),
       changePct: num(meta?.regularMarketChangePercent),
       spark: downsample(points.map((point) => point.c)),
+      daily: dailyCloses(points),
       weekPct: changeOver(points, 7),
       monthPct: changeOver(points, 30),
     });
@@ -282,11 +357,11 @@ async function loadCnbc(symbols: string[]): Promise<Map<string, Print>> {
   return map;
 }
 
-type FiatPoint = { price: number; changes: Record<CompareSpan, number | null>; spark: number[] };
+type FiatPoint = { price: number; changes: Record<CompareSpan, number | null>; spark: number[]; daily: Array<{ t: number; c: number }> };
 
 async function loadFiat(): Promise<Map<string, FiatPoint> | null> {
   const codes = FIATS.map(([code]) => code).join(",");
-  const start = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const start = new Date(Date.now() - 130 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const body = rec(await getJson(`https://api.frankfurter.dev/v1/${start}..?from=USD&to=${codes}`, 12000));
   const rates = rec(body?.rates);
   if (!rates) return null;
@@ -305,6 +380,7 @@ async function loadFiat(): Promise<Map<string, FiatPoint> | null> {
       price,
       changes: changesFor(changeOver(points, 1), changeOver(points, 7), changeOver(points, 30)),
       spark: points.map((point) => point.c),
+      daily: dailyCloses(points),
     });
   }
   return out.size ? out : null;
@@ -315,26 +391,23 @@ type CompareSlice = { assets: AssetRow[]; warnings: string[] };
 async function buildCompare(): Promise<CompareSlice> {
   const symbols = [...EQUITIES.map((e) => e.ticker), ...CRYPTOS.map((c) => c.yahoo)];
   const warnings: string[] = [];
-  const listed = CRYPTOS.filter((c) => c.kraken || c.coinbase);
-  const krakenJobs = listed.filter((c) => c.kraken).map(async (c) => ({
-    ticker: c.ticker,
-    print: await grab(kraken(c.kraken!)),
-  }));
-  const coinbaseJobs = listed.filter((c) => c.coinbase).map(async (c) => ({
-    ticker: c.ticker,
-    print: await grab(coinbase(c.coinbase!)),
+  const krakenPairs = CRYPTOS.filter((coin) => coin.kraken).map((coin) => ({ ticker: coin.ticker, pair: coin.kraken! }));
+  const coinbaseJobs = CRYPTOS.filter((coin) => coin.coinbase).map(async (coin) => ({
+    ticker: coin.ticker,
+    print: await grab(coinbase(coin.coinbase!)),
   }));
 
-  const [yahoo, cnbc, fiat, krakenPrints, coinbasePrints] = await Promise.all([
+  const [yahoo, cnbc, fiat, krakenPrints, coinbasePrints, bitstampPrints] = await Promise.all([
     loadYahooMany(symbols),
     grab(loadCnbc(EQUITIES.map((e) => e.ticker))),
     grab(loadFiat()),
-    Promise.all(krakenJobs),
+    grab(krakenMany(krakenPairs)),
     Promise.all(coinbaseJobs),
+    grab(bitstamp()),
   ]);
 
   const direct = new Map<string, Print[]>();
-  for (const row of [...krakenPrints, ...coinbasePrints]) {
+  for (const row of [...(krakenPrints ?? []), ...coinbasePrints, ...(bitstampPrints ?? [])]) {
     if (!row.print) continue;
     const list = direct.get(row.ticker) ?? [];
     list.push(row.print);
@@ -360,6 +433,7 @@ async function buildCompare(): Promise<CompareSlice> {
       spreadPct: summary.spreadPct,
       spark: shape?.spark ?? [],
       sparkLabel: "1m",
+      daily: shape?.daily ?? [],
       venues: prints.map((p) => ({ name: p.name, price: p.price, changePct: p.changePct })),
       caution: yahooOnly ? "A backup quote. The usual exchanges do not list this." : cautionFor(prints.length, summary.spreadPct, 2, null),
     });
@@ -382,6 +456,7 @@ async function buildCompare(): Promise<CompareSlice> {
       spreadPct: summary.spreadPct,
       spark: yh?.spark ?? [],
       sparkLabel: "1m",
+      daily: yh?.daily ?? [],
       venues: prints.map((p) => ({ name: p.name, price: p.price, changePct: p.changePct })),
       caution: cautionFor(prints.length, summary.spreadPct, 1, null),
     });
@@ -401,6 +476,7 @@ async function buildCompare(): Promise<CompareSlice> {
       spreadPct: null,
       spark: row?.spark ?? [],
       sparkLabel: "1m",
+      daily: row?.daily ?? [],
       venues: row ? [{ name: "ECB", price: row.price, changePct: row.changes["24h"] }] : [],
       caution: null,
     });
@@ -467,16 +543,15 @@ async function buildBoard(): Promise<Board> {
   if (btcSummary.price == null) warnings.push("No BTC/USD reference, so BTC-quoted XBT books stay out of the dollar mark.");
   if (usdtUsd == null) warnings.push("No USDT/USD rate. USDT books are left unscaled.");
 
-  const nk = new Map<QuoteCcy, Record<string, unknown> | null>([
-    ["USDT", nkUsdt ? rec(nkUsdt) : null],
-    ["BTC", nkBtc ? rec(nkBtc) : null],
-  ]);
+  const nk = new Map<QuoteCcy, Record<string, unknown> | null>();
+  if (nkUsdt) nk.set("USDT", rec(nkUsdt));
+  if (nkBtc) nk.set("BTC", rec(nkBtc));
   if (!nkUsdt && !nkBtc) warnings.push("NonKYC did not respond.");
   if (!neoxBody) warnings.push("Neoxa did not respond.");
 
   const books = buildXbtBooks({
     neox: neoxBody ? parseNeox(neoxBody) : null,
-    nk: !nkUsdt && !nkBtc && !nkUsdc ? new Map() : nk,
+    nk,
     depth: new Map([
       ["BTCB2_USDC", depthUsdc],
       ["BTCB2_USDT", depthUsdt],
@@ -485,15 +560,6 @@ async function buildBoard(): Promise<Board> {
     btcUsd: btcSummary.price,
     usdtUsd,
   });
-
-  if (!nkUsdt && !nkBtc && !nkUsdc) {
-    for (const book of books) {
-      if (book.venue === "NonKYC") {
-        book.status = "error";
-        book.note = "NonKYC did not respond.";
-      }
-    }
-  }
 
   const usable = books.filter((b) => b.status === "ok" && b.usdPrice != null && b.usdPrice > 0);
   if (!usable.length) {
@@ -514,7 +580,6 @@ async function buildBoard(): Promise<Board> {
   const btcAvg = quoteAverage(books, "BTC");
   const usdtAvg = quoteAverage(books, "USDT");
   const usdcAvg = quoteAverage(books, "USDC");
-  warnings.push(...compare.warnings);
   const dayPct = mean(
     usable
       .map((book) => usdChange(book.quote, book.changePct, btcSummary.changePct))
@@ -755,6 +820,107 @@ export function loadBoard(): Promise<Board> {
   return boardFlight;
 }
 
+const HISTORY_TTL_MS = 60 * 60 * 1000;
+let historyCache: { at: number; data: MarkHistory } | null = null;
+
+function dayKey(ms: number): number {
+  const day = new Date(ms);
+  return Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+}
+
+function neoxDays(body: unknown): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const item of arr(rec(body)?.candles)) {
+    const row = rec(item);
+    const t = num(row?.time);
+    const c = num(row?.close);
+    if (t == null || c == null || c <= 0) continue;
+    map.set(dayKey(t * 1000), c);
+  }
+  return map;
+}
+
+function nonkycDays(body: unknown): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const item of arr(rec(body)?.bars)) {
+    const row = rec(item);
+    const t = num(row?.time);
+    const c = num(row?.close);
+    if (t == null || c == null || c <= 0) continue;
+    map.set(dayKey(t > 1e12 ? t : t * 1000), c);
+  }
+  return map;
+}
+
+function coinbaseDays(body: unknown): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const item of arr(body)) {
+    if (!Array.isArray(item)) continue;
+    const t = num(item[0]);
+    const c = num(item[4]);
+    if (t == null || c == null || c <= 0) continue;
+    map.set(dayKey(t * 1000), c);
+  }
+  return map;
+}
+
+export async function loadMarkHistory(): Promise<MarkHistory> {
+  if (historyCache && Date.now() - historyCache.at < HISTORY_TTL_MS) return historyCache.data;
+  const now = Math.floor(Date.now() / 1000);
+  const from = now - 120 * 86400;
+  const start = new Date(from * 1000).toISOString();
+  const end = new Date(now * 1000).toISOString();
+  const [nxUsdc, nxUsdt, nxBtc, nkUsdt, nkBtc, btcUsdBody, usdtUsdBody] = await Promise.all([
+    grab(getJson("https://neoxa.exchange/api/exchange/candles/BTCB2_USDC?interval=1d&limit=120")),
+    grab(getJson("https://neoxa.exchange/api/exchange/candles/BTCB2_USDT?interval=1d&limit=120")),
+    grab(getJson("https://neoxa.exchange/api/exchange/candles/BTCB2_BTC?interval=1d&limit=120")),
+    grab(getJson(`https://api.nonkyc.io/api/v2/market/candles?symbol=BTCB2_USDT&resolution=1440&from=${from}&to=${now}`)),
+    grab(getJson(`https://api.nonkyc.io/api/v2/market/candles?symbol=BTCB2_BTC&resolution=1440&from=${from}&to=${now}`)),
+    grab(getJson(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=86400&start=${start}&end=${end}`)),
+    grab(getJson(`https://api.exchange.coinbase.com/products/USDT-USD/candles?granularity=86400&start=${start}&end=${end}`)),
+  ]);
+  const usdc = neoxDays(nxUsdc);
+  const neoxUsdt = neoxDays(nxUsdt);
+  const neoxBtc = neoxDays(nxBtc);
+  const nonkycUsdt = nonkycDays(nkUsdt);
+  const nonkycBtc = nonkycDays(nkBtc);
+  const btcUsd = coinbaseDays(btcUsdBody);
+  const usdtUsd = coinbaseDays(usdtUsdBody);
+  const days = new Set<number>([...usdc.keys(), ...neoxUsdt.keys(), ...neoxBtc.keys(), ...nonkycUsdt.keys(), ...nonkycBtc.keys()]);
+  const points = [...days]
+    .sort((a, b) => a - b)
+    .map((day) => {
+      const prices: number[] = [];
+      const usdcClose = usdc.get(day);
+      if (usdcClose != null) prices.push(usdcClose);
+      const usdtFx = usdtUsd.get(day) ?? 1;
+      const neoxUsdtClose = neoxUsdt.get(day);
+      if (neoxUsdtClose != null) prices.push(neoxUsdtClose * usdtFx);
+      const nonkycUsdtClose = nonkycUsdt.get(day);
+      if (nonkycUsdtClose != null) prices.push(nonkycUsdtClose * usdtFx);
+      const btcFx = btcUsd.get(day);
+      if (btcFx != null) {
+        const neoxBtcClose = neoxBtc.get(day);
+        if (neoxBtcClose != null) prices.push(neoxBtcClose * btcFx);
+        const nonkycBtcClose = nonkycBtc.get(day);
+        if (nonkycBtcClose != null) prices.push(nonkycBtcClose * btcFx);
+      }
+      if (!prices.length) return null;
+      const c = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+      return { t: day, c, books: prices.length };
+    })
+    .filter((point): point is MarkHistory["points"][number] => point != null);
+
+  if (points.length < 2) throw new Error("No history");
+  const data: MarkHistory = {
+    from: points[0]?.t ?? from * 1000,
+    to: points.at(-1)?.t ?? now * 1000,
+    points,
+  };
+  if (points.length) historyCache = { at: Date.now(), data };
+  return data;
+}
+
 const chartCache = new Map<string, { at: number; data: ChartPayload }>();
 
 const LIMITS: Record<ChartPayload["interval"], number> = {
@@ -801,11 +967,9 @@ function onTheClock(
       candles.push({ t: t * 1000, o: carry, h: carry, l: carry, c: carry, v: 0 });
     }
   }
-  const span = (end - start) * 1000;
   const first = candles[0]?.t ?? start * 1000;
-  // A young book should fill the card, not sit on the right of a long empty window.
-  const from = first - start * 1000 > span / 2 ? first : start * 1000;
-  return { from, to: end * 1000, candles };
+  // A short book should fill the card. A full window already starts on the first candle.
+  return { from: first, to: end * 1000, candles };
 }
 
 const NK_RES: Record<ChartPayload["interval"], string> = {

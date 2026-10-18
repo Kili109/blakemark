@@ -18,7 +18,7 @@ export const Route = createRootRoute({
         content:
           "Average price of Bitcoin on Blake2b — XBT on Neoxa and BTCB2 on NonKYC — set beside tech stocks, other coins, and index funds.",
       },
-      { name: "theme-color", content: "#14120e" },
+      { name: "theme-color", content: "#171522" },
     ],
     links: [
       { rel: "icon", type: "image/png", href: "/favicon.png" },
@@ -27,7 +27,7 @@ export const Route = createRootRoute({
       { rel: "apple-touch-icon", href: "/__grok/icon-180.png" },
       {
         rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,640&family=IBM+Plex+Sans:wght@400;500;600&display=swap",
+        href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
       },
     ],
   }),

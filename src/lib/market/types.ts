@@ -39,6 +39,7 @@ export type AssetRow = {
   spreadPct: number | null;
   spark: number[];
   sparkLabel: string;
+  daily: Array<{ t: number; c: number }>;
   venues: VenuePrint[];
   caution: string | null;
 };
@@ -87,6 +88,18 @@ export type Candle = {
   l: number;
   c: number;
   v: number;
+};
+
+export type MarkPoint = {
+  t: number;
+  c: number;
+  books: number;
+};
+
+export type MarkHistory = {
+  from: number;
+  to: number;
+  points: MarkPoint[];
 };
 
 export type ChartPayload = {
