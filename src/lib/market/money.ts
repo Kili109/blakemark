@@ -69,6 +69,7 @@ export function tracedChange(points: DayClose[], days: number): number | null {
   for (const point of points) {
     if (point.t <= target) pick = point;
   }
+  if (!pick && last.t - points[0]!.t >= days * 86_400_000 * 0.75) pick = points[0]!;
   if (!pick || pick.c <= 0 || last.c <= 0) return null;
   if (last.t - pick.t < days * 86_400_000 * 0.7) return null;
   return ((last.c - pick.c) / pick.c) * 100;

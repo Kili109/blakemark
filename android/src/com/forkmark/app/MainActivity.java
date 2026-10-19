@@ -178,6 +178,38 @@ public class MainActivity extends Activity {
 
     private final class ChromeBridge {
         @JavascriptInterface
+        public String versionName() {
+            try {
+                String name = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+                return name == null ? "" : name;
+            } catch (Exception ignored) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public void openLink(String url) {
+            if (url == null || !url.startsWith("https://github.com/Kili109/blakemark/")) return;
+            runOnUiThread(() -> {
+                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                intent.addCategory(Intent.CATEGORY_BROWSABLE);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                String browser = browserPackage();
+                if (browser != null) intent.setPackage(browser);
+                try {
+                    startActivity(intent);
+                } catch (ActivityNotFoundException ignored) {
+                    intent.setPackage(null);
+                    try {
+                        startActivity(intent);
+                    } catch (ActivityNotFoundException again) {
+                        // No browser to open the release page.
+                    }
+                }
+            });
+        }
+
+        @JavascriptInterface
         public void setChrome(String theme, String links) {
             String safeTheme = "light".equals(theme) ? "light" : "dark";
             String safeLinks = "app".equals(links) ? "app" : "here".equals(links) ? "here" : "browser";

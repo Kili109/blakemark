@@ -6,9 +6,19 @@ export const getBoard = createServerFn({ method: "GET" }).handler(async () => {
   return loadBoard();
 });
 
+export const getFinePrices = createServerFn({ method: "GET" }).handler(async () => {
+  const { loadFinePrices } = await import("./board.server");
+  return loadFinePrices();
+});
+
 export const getMarkHistory = createServerFn({ method: "GET" }).handler(async () => {
   const { loadMarkHistory } = await import("./board.server");
   return loadMarkHistory();
+});
+
+export const getBlocks = createServerFn({ method: "GET" }).handler(async () => {
+  const { loadBlocks } = await import("./blocks");
+  return loadBlocks();
 });
 
 export const getXbtChart = createServerFn({ method: "GET" })

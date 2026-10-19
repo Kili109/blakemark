@@ -6,6 +6,7 @@ import type {
   Candle,
   ChartPayload,
   CompareSpan,
+  FinePrices,
   MarkHistory,
   QuoteCcy,
   VenuePrint,
@@ -862,6 +863,206 @@ function coinbaseDays(body: unknown): Map<number, number> {
     map.set(dayKey(t * 1000), c);
   }
   return map;
+}
+
+
+const FINE_TTL_MS = 5 * 60 * 1000;
+
+function rememberClose(map: Map<number, number>, time: number | null, close: number | null, step: number) {
+  if (time == null || close == null || close <= 0) return;
+  const ms = time > 1e12 ? time : time * 1000;
+  map.set(Math.floor(ms / step) * step, close);
+}
+
+function neoxFine(body: unknown, step: number): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const item of arr(rec(body)?.candles)) {
+    const row = rec(item);
+    rememberClose(map, num(row?.time), num(row?.close), step);
+  }
+  return map;
+}
+
+function nonkycFine(body: unknown, step: number): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const item of arr(rec(body)?.bars)) {
+    const row = rec(item);
+    rememberClose(map, num(row?.time), num(row?.close), step);
+  }
+  return map;
+}
+
+function coinbaseFine(body: unknown, step: number): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const item of arr(body)) {
+    if (!Array.isArray(item)) continue;
+    rememberClose(map, num(item[0]), num(item[4]), step);
+  }
+  return map;
+}
+
+function carried(map: Map<number, number>, times: number[], t: number, cursor: { i: number; rate: number | null }): number | null {
+  while (cursor.i < times.length && times[cursor.i]! <= t) {
+    cursor.rate = map.get(times[cursor.i]!) ?? cursor.rate;
+    cursor.i += 1;
+  }
+  return cursor.rate;
+}
+
+async function loadFineMark(hourly: boolean): Promise<Array<{ t: number; c: number }>> {
+  const step = hourly ? 60 * 60 * 1000 : 15 * 60 * 1000;
+  const now = Math.floor(Date.now() / 1000);
+  const from = now - (hourly ? 8 : 5) * 86400;
+  const gran = hourly ? 3600 : 900;
+  const coinbase = hourly
+    ? [
+        grab(getJson(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=${gran}&start=${now - 300 * gran}&end=${now}`)),
+        grab(getJson(`https://api.exchange.coinbase.com/products/USDT-USD/candles?granularity=${gran}&start=${now - 300 * gran}&end=${now}`)),
+      ]
+    : [
+        grab(getJson(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=${gran}&start=${now - 300 * gran}&end=${now}`)),
+        grab(getJson(`https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=${gran}&start=${now - 600 * gran}&end=${now - 300 * gran}`)),
+        grab(getJson(`https://api.exchange.coinbase.com/products/USDT-USD/candles?granularity=${gran}&start=${now - 300 * gran}&end=${now}`)),
+        grab(getJson(`https://api.exchange.coinbase.com/products/USDT-USD/candles?granularity=${gran}&start=${now - 600 * gran}&end=${now - 300 * gran}`)),
+      ];
+  const [nxUsdc, nxUsdt, nxBtc, nkUsdt, nkBtc, ...fxBodies] = await Promise.all([
+    grab(getJson(`https://neoxa.exchange/api/exchange/candles/BTCB2_USDC?interval=${hourly ? "1h" : "15m"}&limit=${hourly ? 200 : 500}`)),
+    grab(getJson(`https://neoxa.exchange/api/exchange/candles/BTCB2_USDT?interval=${hourly ? "1h" : "15m"}&limit=${hourly ? 200 : 500}`)),
+    grab(getJson(`https://neoxa.exchange/api/exchange/candles/BTCB2_BTC?interval=${hourly ? "1h" : "15m"}&limit=${hourly ? 200 : 500}`)),
+    grab(getJson(`https://api.nonkyc.io/api/v2/market/candles?symbol=BTCB2_USDT&resolution=${hourly ? 60 : 15}&from=${from}&to=${now}`)),
+    grab(getJson(`https://api.nonkyc.io/api/v2/market/candles?symbol=BTCB2_BTC&resolution=${hourly ? 60 : 15}&from=${from}&to=${now}`)),
+    ...coinbase,
+  ]);
+  const usdc = neoxFine(nxUsdc, step);
+  const neoxUsdt = neoxFine(nxUsdt, step);
+  const neoxBtc = neoxFine(nxBtc, step);
+  const nonkycUsdt = nonkycFine(nkUsdt, step);
+  const nonkycBtc = nonkycFine(nkBtc, step);
+  const btcUsd = new Map<number, number>();
+  const usdtUsd = new Map<number, number>();
+  fxBodies.forEach((body, index) => {
+    const parsed = coinbaseFine(body, step);
+    const target = hourly ? (index === 0 ? btcUsd : usdtUsd) : index < 2 ? btcUsd : usdtUsd;
+    for (const [time, price] of parsed) target.set(time, price);
+  });
+  const btcTimes = [...btcUsd.keys()].sort((a, b) => a - b);
+  const usdtTimes = [...usdtUsd.keys()].sort((a, b) => a - b);
+  const btcCursor = { i: 0, rate: null as number | null };
+  const usdtCursor = { i: 0, rate: null as number | null };
+  const buckets = [...new Set<number>([...usdc.keys(), ...neoxUsdt.keys(), ...neoxBtc.keys(), ...nonkycUsdt.keys(), ...nonkycBtc.keys()])].sort(
+    (a, b) => a - b,
+  );
+  const points: Array<{ t: number; c: number }> = [];
+  for (const t of buckets) {
+    const prices: number[] = [];
+    const usdcClose = usdc.get(t);
+    if (usdcClose != null) prices.push(usdcClose);
+    const usdtFx = carried(usdtUsd, usdtTimes, t, usdtCursor) ?? 1;
+    const neoxUsdtClose = neoxUsdt.get(t);
+    if (neoxUsdtClose != null) prices.push(neoxUsdtClose * usdtFx);
+    const nonkycUsdtClose = nonkycUsdt.get(t);
+    if (nonkycUsdtClose != null) prices.push(nonkycUsdtClose * usdtFx);
+    const btcFx = carried(btcUsd, btcTimes, t, btcCursor);
+    if (btcFx != null) {
+      const neoxBtcClose = neoxBtc.get(t);
+      if (neoxBtcClose != null) prices.push(neoxBtcClose * btcFx);
+      const nonkycBtcClose = nonkycBtc.get(t);
+      if (nonkycBtcClose != null) prices.push(nonkycBtcClose * btcFx);
+    }
+    if (!prices.length) continue;
+    points.push({ t, c: prices.reduce((sum, price) => sum + price, 0) / prices.length });
+  }
+  return points;
+}
+
+async function loadYahooFine(
+  jobs: Array<{ ticker: string; symbol: string; invert: boolean }>,
+  range: string,
+  interval: string,
+): Promise<Record<string, Array<{ t: number; c: number }>>> {
+  const url =
+    "https://query1.finance.yahoo.com/v7/finance/spark?symbols=" +
+    jobs.map((job) => job.symbol).join(",") +
+    `&range=${range}&interval=${interval}`;
+  const body = rec(await getJson(url, 12000));
+  const invert = new Map(jobs.map((job) => [job.symbol, job.invert]));
+  const ticker = new Map(jobs.map((job) => [job.symbol, job.ticker]));
+  const series: Record<string, Array<{ t: number; c: number }>> = {};
+  for (const item of arr(rec(body?.spark)?.result)) {
+    const row = rec(item);
+    const symbol = typeof row?.symbol === "string" ? row.symbol : null;
+    const name = symbol ? ticker.get(symbol) : null;
+    if (!symbol || !name) continue;
+    const response = rec(arr(row?.response)[0]);
+    const quote = rec(arr(rec(response?.indicators)?.quote)[0]);
+    const times = arr(response?.timestamp).map(num);
+    const closes = arr(quote?.close);
+    const points: Array<{ t: number; c: number }> = [];
+    for (let i = 0; i < closes.length; i += 1) {
+      const close = num(closes[i]);
+      const time = times[i];
+      if (close == null || time == null || close <= 0) continue;
+      const ms = time > 1e12 ? time : time * 1000;
+      points.push({ t: ms, c: invert.get(symbol) ? 1 / close : close });
+    }
+    points.sort((a, b) => a.t - b.t);
+    if (points.length) series[name] = points;
+  }
+  return series;
+}
+
+const EMPTY_FINE: FinePrices = { mark15: [], markHour: [], series15: {}, seriesHour: {} };
+
+async function buildFinePrices(): Promise<FinePrices> {
+  const fxJobs: Array<{ ticker: string; symbol: string; invert: boolean }> = [
+    { ticker: "EUR", symbol: "EURUSD=X", invert: false },
+    { ticker: "GBP", symbol: "GBPUSD=X", invert: false },
+    { ticker: "AUD", symbol: "AUDUSD=X", invert: false },
+    { ticker: "JPY", symbol: "JPY=X", invert: true },
+    { ticker: "CHF", symbol: "CHF=X", invert: true },
+    { ticker: "CAD", symbol: "CAD=X", invert: true },
+    { ticker: "CNY", symbol: "CNY=X", invert: true },
+    { ticker: "INR", symbol: "INR=X", invert: true },
+  ];
+  const jobs = [
+    ...EQUITIES.map((item) => ({ ticker: item.ticker, symbol: item.ticker, invert: false })),
+    ...CRYPTOS.map((item) => ({ ticker: item.ticker, symbol: item.yahoo, invert: false })),
+    ...fxJobs,
+  ];
+  const chunks: Array<typeof jobs> = [];
+  for (let i = 0; i < jobs.length; i += 12) chunks.push(jobs.slice(i, i + 12));
+  const [mark15, markHour, ...parts] = await Promise.all([
+    loadFineMark(false),
+    loadFineMark(true),
+    ...chunks.map((chunk) => grab(loadYahooFine(chunk, "5d", "15m"))),
+    ...chunks.map((chunk) => grab(loadYahooFine(chunk, "7d", "1h"))),
+  ]);
+  const series15: FinePrices["series15"] = {};
+  const seriesHour: FinePrices["seriesHour"] = {};
+  parts.forEach((part, index) => {
+    if (!part) return;
+    Object.assign(index < chunks.length ? series15 : seriesHour, part);
+  });
+  return { mark15, markHour, series15, seriesHour };
+}
+
+let fineCache: { at: number; data: FinePrices } | null = null;
+let fineFlight: Promise<FinePrices> | null = null;
+
+export function loadFinePrices(): Promise<FinePrices> {
+  if (fineCache && Date.now() - fineCache.at < FINE_TTL_MS) return Promise.resolve(fineCache.data);
+  if (!fineFlight) {
+    fineFlight = buildFinePrices()
+      .then((data) => {
+        if (data.mark15.length >= 3 || data.markHour.length >= 3) fineCache = { at: Date.now(), data };
+        return data;
+      })
+      .catch(() => fineCache?.data ?? EMPTY_FINE)
+      .finally(() => {
+        fineFlight = null;
+      });
+  }
+  return fineFlight;
 }
 
 export async function loadMarkHistory(): Promise<MarkHistory> {

@@ -102,6 +102,13 @@ export type MarkHistory = {
   points: MarkPoint[];
 };
 
+export type FinePrices = {
+  mark15: Array<{ t: number; c: number }>;
+  markHour: Array<{ t: number; c: number }>;
+  series15: Record<string, Array<{ t: number; c: number }>>;
+  seriesHour: Record<string, Array<{ t: number; c: number }>>;
+};
+
 export type ChartPayload = {
   quote: QuoteCcy;
   interval: "15m" | "1h" | "4h" | "1d";

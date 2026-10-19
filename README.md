@@ -21,4 +21,4 @@ npm run dev
 
 Open http://localhost:8080.
 
-Port 8080 is the default, set in package.json. If that port is already in use, change it there and open the port you chose.
+Port 8080 is the default, set in `package.json`. If that port is already in use, change it there and open the port you chose.

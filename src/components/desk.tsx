@@ -1,14 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ExternalLink, RefreshCw, Settings, TriangleAlert } from "lucide-react";
+import { ChevronDown, ExternalLink, RefreshCw, Settings } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { BlocksCard } from "@/components/blocks-card";
 import { Sparkline } from "@/components/sparkline";
 import { XbtChart } from "@/components/xbt-chart";
-import { getBoard, getMarkHistory } from "@/lib/market/board.functions";
+import { getBoard, getFinePrices, getMarkHistory } from "@/lib/market/board.functions";
 import { formatClock, formatCompactUsd, formatPct, formatPlain, formatQty, tone } from "@/lib/market/format";
-import { convertSpot, CURRENCIES, formatMoney, presentAsset, traceConvert, tracedChange, tracedSpans } from "@/lib/market/money";
+import { convertSpot, CURRENCIES, formatMoney, presentAsset, traceConvert, tracedChange, tracedSpans, type Currency, type DayClose } from "@/lib/market/money";
 import { applySettings, DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as AppSettings } from "@/lib/settings";
-import type { AssetKind, AssetRow, BestPrice, Board, CompareSpan, XbtBook } from "@/lib/market/types";
+import type { AssetKind, AssetRow, BestPrice, Board, CompareSpan, FinePrices, XbtBook } from "@/lib/market/types";
 
 const GROUPS: Array<{ id: AssetKind; label: string }> = [
   { id: "tech", label: "Tech" },
@@ -23,7 +24,177 @@ const SPANS: Array<{ id: CompareSpan; label: string }> = [
   { id: "1m", label: "1m" },
 ];
 
-type SortKey = "listed" | "performance";
+type ChartSide = "xbt" | "asset" | "fiat";
+
+function windowSeries(points: DayClose[], span: CompareSpan): DayClose[] {
+  if (points.length < 2) return points;
+  const last = points[points.length - 1]!.t;
+  const days = span === "24h" ? 1 : span === "1w" ? 7 : 30;
+  const cutoff = last - days * 86_400_000;
+  const sliced = points.filter((point) => point.t >= cutoff);
+  return sliced.length >= 2 ? sliced : points.slice(-2);
+}
+
+function axisFigure(n: number, currency: Currency | null): string {
+  const options: Intl.NumberFormatOptions = { maximumSignificantDigits: 3 };
+  if (currency) {
+    options.style = "currency";
+    options.currency = currency;
+  }
+  return new Intl.NumberFormat("en-US", options).format(n);
+}
+
+function chartWhen(t: number, span: CompareSpan, axis: boolean): string {
+  const date = new Date(t);
+  const day = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: span === "1m" ? "UTC" : undefined }).format(date);
+  if (span === "1m" || (axis && span === "1w")) return day;
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  if (axis && span === "24h") return `${hh}:${mm}`;
+  return `${day}  ${hh}:${mm}`;
+}
+
+function nearestDayStart(t: number, utc: boolean): number {
+  if (utc) return Math.round(t / 86_400_000) * 86_400_000;
+  const day = new Date(t);
+  const midnight = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+  const next = midnight + 86_400_000;
+  return t - midnight < next - t ? midnight : next;
+}
+
+function axisMarks(points: DayClose[], span: CompareSpan): number[] | undefined {
+  if (points.length < 2) return undefined;
+  const start = points[0]!.t;
+  const end = points[points.length - 1]!.t;
+  if (span === "1w") {
+    const days: number[] = [];
+    const seen = new Set<string>();
+    points.forEach((point, index) => {
+      const key = new Date(point.t).toDateString();
+      if (seen.has(key)) return;
+      seen.add(key);
+      days.push(index);
+    });
+    const from = Math.max(0, days.length - 6);
+    return days.slice(from);
+  }
+  if (span === "24h") {
+    const quarter = 15 * 60 * 1000;
+    const latest = Math.round((Date.now() - 2 * 60 * 60 * 1000) / quarter) * quarter;
+    const step = 5 * 60 * 60 * 1000;
+    return [4, 3, 2, 1, 0].map((i) => latest - i * step).filter((mark) => mark >= start && mark <= end);
+  }
+  const step = 6 * 86_400_000;
+  const latest = nearestDayStart(Date.now() - 3 * 86_400_000, true);
+  return [4, 3, 2, 1, 0].map((i) => latest - i * step).filter((mark) => mark >= start && mark <= end);
+}
+
+function every3h(points: DayClose[]): DayClose[] {
+  const step = 3 * 60 * 60 * 1000;
+  const buckets = new Map<number, number>();
+  for (const point of points) buckets.set(Math.floor(point.t / step) * step, point.c);
+  return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([t, c]) => ({ t, c }));
+}
+
+function seriesChange(points: DayClose[]): number | null {
+  if (points.length < 2) return null;
+  const first = points[0]!.c;
+  const last = points[points.length - 1]!.c;
+  if (!(first > 0) || !(last > 0)) return null;
+  return ((last - first) / first) * 100;
+}
+
+function holdPrice(path: DayClose[], clock: DayClose[], price: (held: number, tick: DayClose) => number | null): DayClose[] {
+  const sorted = [...path].sort((a, b) => a.t - b.t);
+  let index = 0;
+  let held: number | null = null;
+  const out: DayClose[] = [];
+  for (const tick of clock) {
+    while (index < sorted.length && sorted[index]!.t <= tick.t) {
+      held = sorted[index]!.c;
+      index += 1;
+    }
+    if (held == null || held <= 0) continue;
+    const next = price(held, tick);
+    if (next == null || !(next > 0)) continue;
+    out.push({ t: tick.t, c: next });
+  }
+  return out;
+}
+
+function comparisonPoints(
+  asset: AssetRow,
+  side: ChartSide,
+  marks: Map<number, number> | null,
+  fx: DayClose[] | null,
+  span: CompareSpan,
+  fine: FinePrices | null,
+  currency: Currency,
+): DayClose[] {
+  if (span === "1m") {
+    const path = (side === "fiat" && fx?.length ? traceConvert(asset.daily, fx) : asset.daily).filter((point) => point.c > 0);
+    if (!path.length) return [];
+    const step = 86_400_000;
+    const clock: DayClose[] = [];
+    if (side !== "fiat" && marks?.size) {
+      for (const [t, c] of [...marks.entries()].sort((a, b) => a[0] - b[0])) {
+        const prev = clock[clock.length - 1];
+        if (prev) {
+          for (let day = prev.t + step; day < t; day += step) clock.push({ t: day, c: prev.c });
+        }
+        if (c > 0) clock.push({ t, c });
+      }
+      const live = fine?.markHour ?? [];
+      const today = Math.floor(Date.now() / step) * step;
+      const last = clock[clock.length - 1];
+      if (last && live.length) {
+        for (let day = last.t + step; day <= today; day += step) {
+          let close = last.c;
+          for (const point of live) {
+            if (point.t >= day + step) break;
+            if (point.c > 0) close = point.c;
+          }
+          clock.push({ t: day, c: close });
+        }
+      }
+    } else if (side === "fiat") {
+      const end = Math.floor(Date.now() / step) * step;
+      for (let day = Math.floor(path[0]!.t / step) * step; day <= end; day += step) clock.push({ t: day, c: 0 });
+    }
+    if (clock.length < 2) return [];
+    const priced = holdPrice(path, clock, (held, tick) => {
+      if (side === "fiat" || tick.c <= 0) return held;
+      return side === "xbt" ? held / tick.c : tick.c / held;
+    });
+    const shown = windowSeries(priced, span);
+    return shown.length >= 2 ? shown : [];
+  }
+  const hourly = span === "1w";
+  const fineMark = hourly ? fine?.markHour : fine?.mark15;
+  const book = hourly ? fine?.seriesHour : fine?.series15;
+  if (!fineMark?.length || !book) return [];
+  const usdRow = asset.kind === "fiat" && asset.ticker === "USD";
+  if (usdRow && side !== "fiat") {
+    const moving = fineMark
+      .filter((point) => point.c > 0)
+      .map((point) => ({ t: point.t, c: side === "xbt" ? 1 / point.c : point.c }));
+    const shown = windowSeries(moving, span);
+    const stepped = span === "1w" ? every3h(shown) : shown;
+    return stepped.length >= 2 ? stepped : [];
+  }
+  const path = usdRow
+    ? (book[currency] ?? []).map((point) => ({ t: point.t, c: 1 / point.c }))
+    : (book[asset.ticker] ?? []);
+  if (!path.length) return [];
+  const priced = holdPrice(path, fineMark, (held, tick) => {
+    if (side === "fiat") return held;
+    if (tick.c <= 0) return null;
+    return side === "xbt" ? held / tick.c : tick.c / held;
+  });
+  const shown = windowSeries(side === "fiat" && fx?.length ? traceConvert(priced, fx) : priced, span);
+  const stepped = span === "1w" ? every3h(shown) : shown;
+  return stepped.length >= 2 ? stepped : [];
+}
 
 const SettingsContext = createContext<AppSettings>(DEFAULT_SETTINGS);
 const SettingsUpdate = createContext<(next: AppSettings) => void>(() => {});
@@ -107,6 +278,7 @@ export function Desk() {
           </p>
         ) : null}
         {board.data ? <Loaded data={board.data} /> : null}
+        <AppFooter />
       </main>
       </SettingsUpdate.Provider>
     </SettingsContext.Provider>
@@ -114,6 +286,91 @@ export function Desk() {
 }
 
 const SATS = "bc1qsgwhrct73ag6f6ynfwqlpr2gdqy6s8vr7pwrrk";
+const APP_VERSION = "1.2.0";
+const RELEASES = "https://github.com/Kili109/blakemark/releases/latest";
+
+function versionParts(value: string): number[] {
+  return value
+    .replace(/^v/i, "")
+    .split(".")
+    .map((part) => {
+      const n = Number.parseInt(part, 10);
+      return Number.isFinite(n) ? n : 0;
+    });
+}
+
+function isNewerRelease(remote: string, installed: string): boolean {
+  const next = versionParts(remote);
+  const current = versionParts(installed);
+  const length = Math.max(next.length, current.length);
+  for (let i = 0; i < length; i += 1) {
+    const gap = (next[i] ?? 0) - (current[i] ?? 0);
+    if (gap > 0) return true;
+    if (gap < 0) return false;
+  }
+  return false;
+}
+
+function installedVersion(): string {
+  if (typeof window === "undefined") return APP_VERSION;
+  const native = (window as Window & { BlakemarkNative?: { versionName?: () => string } }).BlakemarkNative;
+  try {
+    const fromApk = native?.versionName?.();
+    return fromApk ? fromApk : APP_VERSION;
+  } catch {
+    return APP_VERSION;
+  }
+}
+
+function openRelease(url: string) {
+  const native = (window as Window & { BlakemarkNative?: { openLink?: (url: string) => void } }).BlakemarkNative;
+  if (native?.openLink) {
+    native.openLink(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
+function AppFooter() {
+  const version = installedVersion();
+  const [state, setState] = useState<"idle" | "checking" | "current" | "newer" | "error">("idle");
+  const [latest, setLatest] = useState<string | null>(null);
+  const [page, setPage] = useState(RELEASES);
+
+  async function check() {
+    setState("checking");
+    try {
+      const res = await fetch("https://api.github.com/repos/Kili109/blakemark/releases/latest", {
+        headers: { accept: "application/vnd.github+json" },
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const body = (await res.json()) as { tag_name?: string; html_url?: string };
+      const tag = typeof body.tag_name === "string" ? body.tag_name : "";
+      if (!tag) throw new Error("no tag");
+      setLatest(tag.replace(/^v/i, ""));
+      setPage(typeof body.html_url === "string" ? body.html_url : RELEASES);
+      setState(isNewerRelease(tag, version) ? "newer" : "current");
+    } catch {
+      setState("error");
+    }
+  }
+
+  return (
+    <p className="mt-8 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+      <span>Version {version}</span>
+      <button type="button" onClick={() => void check()} className="underline decoration-line underline-offset-2">
+        {state === "checking" ? "Checking…" : "Check for updates"}
+      </button>
+      {state === "current" ? <span>Up to date</span> : null}
+      {state === "newer" ? (
+        <button type="button" onClick={() => openRelease(page)} className="text-fg underline decoration-line underline-offset-2">
+          {latest} is available
+        </button>
+      ) : null}
+      {state === "error" ? <span>Couldn't check</span> : null}
+    </p>
+  );
+}
 
 function SatsNote() {
   const [copied, setCopied] = useState(false);
@@ -296,7 +553,10 @@ function Loaded({ data }: { data: Board }) {
         <Mark data={data} />
         <XbtChart axes={axes} currency={display.traced ? display.currency : "USD"} fx={display.fx} />
       </div>
-      <Compare data={data} />
+      <div className="grid gap-4">
+        <Compare data={data} />
+        <BlocksCard />
+      </div>
     </div>
   );
 }
@@ -448,13 +708,37 @@ function Books({ books, money }: { books: XbtBook[]; money: (n: number | null) =
   );
 }
 
+type SortKey = "listed" | "performance";
+
 function Compare({ data }: { data: Board }) {
   const display = useDisplay(data);
   const [kind, setKind] = useState<AssetKind>("tech");
   const [span, setSpan] = useState<CompareSpan>("24h");
-  const [sort, setSort] = useState<SortKey>("performance");
+  const [sort, setSort] = useState<SortKey>("listed");
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  const [side, setSide] = useState<ChartSide>("xbt");
+  const history = useQuery({
+    queryKey: ["mark-history"],
+    queryFn: () => getMarkHistory(),
+    enabled: side !== "fiat",
+    networkMode: "always",
+    gcTime: 24 * 60 * 60 * 1000,
+    staleTime: 60 * 60 * 1000,
+  });
+  const fine = useQuery({
+    queryKey: ["fine-prices"],
+    queryFn: () => getFinePrices(),
+    enabled: span !== "1m",
+    networkMode: "always",
+    gcTime: 24 * 60 * 60 * 1000,
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: span === "1m" ? false : 5 * 60 * 1000,
+  });
+  const marks = useMemo(() => {
+    if (side === "fiat" || !history.data) return null;
+    return new Map(history.data.points.map((point) => [point.t, point.c]));
+  }, [history.data, side]);
   const xbt = display.spot(data.mark.equalUsd);
   const xbtChange = display.traced ? (display.spans?.[span] ?? null) : data.spans[span];
 
@@ -478,7 +762,7 @@ function Compare({ data }: { data: Board }) {
   return (
     <section className="rounded-2xl border border-line bg-surface p-4 lg:sticky lg:top-4">
       <div className="flex items-end justify-between gap-3">
-        <h2 className="font-display text-xl">Compare</h2>
+        <h2 className="font-display text-xl">Compare XBT</h2>
         <p className="text-xs text-muted">{data.session}</p>
       </div>
 
@@ -554,9 +838,16 @@ function Compare({ data }: { data: Board }) {
             key={asset.ticker}
             asset={asset}
             money={display.money}
+            currency={display.traced ? display.currency : "USD"}
+            fx={display.fx}
+            side={side}
+            onSide={setSide}
+            series={comparisonPoints(asset, side, marks, display.fx, span, fine.data ?? null, display.traced ? display.currency : "USD").map((point) => point.c)}
             xbt={xbt}
             xbtChange={xbtChange}
             span={span}
+            fine={fine.data ?? null}
+            finePending={span !== "1m" && fine.isPending && !fine.data}
             open={open === asset.ticker}
             onToggle={() => setOpen((current) => (current === asset.ticker ? null : asset.ticker))}
           />
@@ -570,23 +861,40 @@ function Compare({ data }: { data: Board }) {
 function AssetLine({
   asset,
   money,
+  currency,
+  fx,
+  side,
+  onSide,
+  series,
   xbt,
   xbtChange,
   span,
+  fine,
+  finePending,
   open,
   onToggle,
 }: {
   asset: AssetRow;
   money: (n: number | null) => string;
+  currency: Currency;
+  fx: DayClose[] | null;
+  side: ChartSide;
+  onSide: (side: ChartSide) => void;
+  series: number[];
   xbt: number | null;
   xbtChange: number | null;
   span: CompareSpan;
+  fine: FinePrices | null;
+  finePending: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
   const units = xbt != null && asset.price != null && asset.price > 0 ? xbt / asset.price : null;
-  const change = asset.changes[span];
-  const lead = xbtChange != null && change != null ? xbtChange - change : null;
+  const inXbt = units != null && units > 0 ? 1 / units : null;
+  const inverted = side === "asset";
+  const change = seriesChange(comparisonPoints(asset, "fiat", null, fx, span, fine, currency));
+  const lead = xbtChange != null && asset.changes[span] != null ? xbtChange - asset.changes[span]! : null;
+  const xbtMove = lead == null ? null : inverted ? lead : -lead;
   return (
     <li className="py-3">
       <button type="button" onClick={onToggle} className="flex w-full items-center gap-3 text-left" aria-expanded={open}>
@@ -595,128 +903,128 @@ function AssetLine({
             {asset.ticker}
             <span className="font-normal text-muted"> · {asset.name}</span>
           </p>
-          <p className="mt-1 text-xs text-muted tabular-nums">
-            1 XBT buys {formatQty(units)}
-            {lead != null ? (
-              <>
-                {" · XBT "}
-                <span className={tone(lead)}>{formatPct(lead)}</span> vs this
-              </>
-            ) : null}
-          </p>
-        </div>
-        <Sparkline values={asset.spark} label={asset.sparkLabel} />
-        <div className="w-24 shrink-0 text-right">
-          <p className="text-sm font-medium tabular-nums">{money(asset.price)}</p>
+          <p className="mt-1 text-sm font-medium tabular-nums">{money(asset.price)}</p>
           <p className={"text-xs tabular-nums " + tone(change)}>{formatPct(change)}</p>
         </div>
+        <Sparkline values={series} label={span} />
+        <div className="w-32 shrink-0 text-right">
+          <p className="text-sm font-medium tabular-nums whitespace-nowrap">{inverted ? `XBT buys ${formatQty(units)}` : `XBT ${formatQty(inXbt)}`}</p>
+          <p className={"mt-1 text-xs tabular-nums " + tone(xbtMove)}>{formatPct(xbtMove)}</p>
+        </div>
       </button>
-      {open ? <AssetDetail asset={asset} money={money} /> : null}
+      {open ? (
+        <AssetDetail
+          asset={asset}
+          currency={currency}
+          fx={fx}
+          side={side}
+          onSide={onSide}
+          span={span}
+          fine={fine}
+          finePending={finePending}
+        />
+      ) : null}
     </li>
   );
 }
 
-function AssetDetail({ asset, money }: { asset: AssetRow; money: (n: number | null) => string }) {
+function AssetDetail({
+  asset,
+  currency,
+  fx,
+  side,
+  onSide,
+  span,
+  fine,
+  finePending,
+}: {
+  asset: AssetRow;
+  currency: Currency;
+  fx: DayClose[] | null;
+  side: ChartSide;
+  onSide: (side: ChartSide) => void;
+  span: CompareSpan;
+  fine: FinePrices | null;
+  finePending: boolean;
+}) {
   const axes = useContext(SettingsContext).axes;
-  const [view, setView] = useState<"prices" | "chart">("prices");
-  const prices = asset.venues.map((venue) => venue.price);
-  const low = prices.length ? Math.min(...prices) : null;
-  const high = prices.length ? Math.max(...prices) : null;
-  const range = low != null && high != null && money(low) !== money(high) ? ` · ${money(low)} to ${money(high)}` : "";
   return (
     <div className="mt-2 rounded-xl bg-raised px-3 py-3 text-sm">
-      <p className="text-xs text-muted">
-        {asset.venues.length} price{asset.venues.length === 1 ? "" : "s"}
-        {range} · little chart is {asset.sparkLabel}
-      </p>
-      <div className="mt-3 grid grid-cols-2 gap-1 rounded-full bg-bg p-1" role="group" aria-label="Row detail">
-          {(
-            [
-              ["prices", "Prices"],
-              ["chart", "Chart"],
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              aria-pressed={view === id}
-              onClick={() => setView(id)}
-              className={"min-h-11 rounded-full text-sm " + (view === id ? "bg-fg text-bg" : "text-muted")}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      {view === "chart" ? (
-        <PricedInXbt asset={asset} axes={axes} />
-      ) : (
-        <>
-          {asset.caution ? (
-            <p className="mt-2 flex items-start gap-2 text-xs text-down">
-              <TriangleAlert className="mt-0.5 size-3 shrink-0" />
-              {asset.caution}
-            </p>
-          ) : null}
-          <ul className="mt-2 divide-y divide-line">
-            {asset.venues.map((venue) => (
-              <li key={venue.name} className="flex items-center justify-between py-2">
-                <span>{venue.name}</span>
-                <span className="tabular-nums">
-                  {money(venue.price)}{" "}
-                  {venue.changePct != null ? <span className={tone(venue.changePct)}>{formatPct(venue.changePct)}</span> : null}
-                </span>
-              </li>
-            ))}
-            {asset.venues.length === 0 ? <li className="py-2 text-muted">No venue returned a price.</li> : null}
-          </ul>
-        </>
-      )}
+      <PricedInXbt
+        asset={asset}
+        axes={axes}
+        currency={currency}
+        fx={fx}
+        side={side}
+        onSide={onSide}
+        span={span}
+        fine={fine}
+        finePending={finePending}
+      />
     </div>
   );
 }
 
-function PricedInXbt({ asset, axes }: { asset: AssetRow; axes: boolean }) {
-  const [side, setSide] = useState<"xbt" | "asset">("xbt");
+function PricedInXbt({
+  asset,
+  axes,
+  currency,
+  fx,
+  side,
+  onSide,
+  span,
+  fine,
+  finePending,
+}: {
+  asset: AssetRow;
+  axes: boolean;
+  currency: Currency;
+  fx: DayClose[] | null;
+  side: ChartSide;
+  onSide: (side: ChartSide) => void;
+  span: CompareSpan;
+  fine: FinePrices | null;
+  finePending: boolean;
+}) {
   const history = useQuery({
     queryKey: ["mark-history"],
     queryFn: () => getMarkHistory(),
+    enabled: side !== "fiat",
     networkMode: "always",
     gcTime: 24 * 60 * 60 * 1000,
     staleTime: 60 * 60 * 1000,
   });
-  const points = useMemo(() => {
+  const shown = useMemo(() => {
     const marks = new Map((history.data?.points ?? []).map((point) => [point.t, point.c]));
-    return asset.daily
-      .map((day) => {
-        const mark = marks.get(day.t);
-        if (mark == null || mark <= 0 || day.c <= 0) return null;
-        const c = side === "xbt" ? day.c / mark : mark / day.c;
-        return { t: day.t, c };
-      })
-      .filter((point): point is { t: number; c: number } => point != null);
-  }, [asset.daily, history.data, side]);
-  const first = points[0]?.c ?? null;
-  const last = points[points.length - 1]?.c ?? null;
+    return comparisonPoints(asset, side, side === "fiat" ? null : marks, fx, span, fine, currency);
+  }, [asset, currency, fine, fx, history.data, side, span]);
+  const plot = useMemo(() => shown.map((point, i) => ({ ...point, i })), [shown]);
+  const marks = axisMarks(shown, span);
+  const first = shown[0]?.c ?? null;
+  const last = shown[shown.length - 1]?.c ?? null;
   const rising = first != null && last != null ? last >= first : true;
   const stroke = rising ? "var(--color-up)" : "var(--color-down)";
-  const waiting = !history.data && (history.isPending || history.isFetching);
+  const waiting =
+    (span !== "1m" && finePending) ||
+    (span === "1m" && side !== "fiat" && !history.data && (history.isPending || history.isFetching));
   const unit = side === "xbt" ? "XBT" : asset.ticker;
 
   return (
-    <div className="mt-3">
-      <div className="grid grid-cols-2 gap-1 rounded-full bg-bg p-1" role="group" aria-label="Price side">
+    <div>
+      <div className="grid grid-cols-3 gap-1 rounded-full bg-bg p-1" role="group" aria-label="Price side">
         {(
           [
             ["xbt", "Priced in XBT"],
-            ["asset", `Priced in ${asset.ticker}`],
+            ["asset", "Inverted"],
+            ["fiat", `Priced in ${currency}`],
           ] as const
         ).map(([id, label]) => (
           <button
             key={id}
             type="button"
             aria-pressed={side === id}
-            onClick={() => setSide(id)}
-            className={"min-h-11 rounded-full px-2 text-sm " + (side === id ? "bg-fg text-bg" : "text-muted")}
+            onClick={() => onSide(id)}
+            className={"min-h-11 rounded-full px-1 text-xs " + (side === id ? "bg-fg text-bg" : "text-muted")}
           >
             {label}
           </button>
@@ -724,35 +1032,39 @@ function PricedInXbt({ asset, axes }: { asset: AssetRow; axes: boolean }) {
       </div>
       <div className={axes ? "mt-2 h-48" : "mt-2 h-40"}>
         {waiting ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted">Loading the daily average…</div>
-        ) : points.length < 2 ? (
+          <div className="flex h-full items-center justify-center text-sm text-muted">
+            {span === "1m" ? "Loading the daily average…" : "Loading prices…"}
+          </div>
+        ) : shown.length < 2 ? (
           <div className="flex h-full items-center justify-center text-sm text-muted">No data available.</div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={points} margin={{ top: 8, right: axes ? 4 : 0, left: 0, bottom: 0 }}>
+            <AreaChart data={plot} margin={{ top: 8, right: axes ? 4 : 0, left: 0, bottom: 0 }}>
               <XAxis
-                dataKey="t"
+                dataKey={span === "1w" ? "i" : "t"}
                 type="number"
-                scale="time"
-                domain={["dataMin", "dataMax"]}
+                scale={span === "1w" ? "linear" : "time"}
+                domain={span === "1w" ? [0, Math.max(plot.length - 1, 1)] : ["dataMin", "dataMax"]}
                 hide={!axes}
-                tick={{ fill: "var(--color-muted)", fontSize: 10 }}
+                ticks={marks}
+                interval={0}
                 axisLine={{ stroke: "var(--color-line)" }}
                 tickLine={false}
-                minTickGap={28}
+                minTickGap={0}
+                tick={{ fill: "var(--color-muted)", fontSize: 10 }}
                 tickFormatter={(value: number) =>
-                  new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(value)
+                  chartWhen(span === "1w" ? nearestDayStart(plot[value]?.t ?? value, false) : value, span, true)
                 }
               />
               <YAxis
                 hide={!axes}
                 orientation="right"
-                width={axes ? 48 : 0}
+                width={axes ? (side === "fiat" ? 46 : 44) : 0}
                 domain={["auto", "auto"]}
                 tick={{ fill: "var(--color-muted)", fontSize: 10 }}
                 axisLine={false}
                 tickLine={false}
-                tickFormatter={(value: number) => formatQty(value)}
+                tickFormatter={(value: number) => axisFigure(value, side === "fiat" ? currency : null)}
               />
               <Tooltip
                 cursor={{ stroke: "var(--color-line)" }}
@@ -762,10 +1074,10 @@ function PricedInXbt({ asset, axes }: { asset: AssetRow; axes: boolean }) {
                   return (
                     <div className="rounded-xl border border-line bg-surface px-3 py-2 text-xs text-fg">
                       <div className="text-muted">
-                        {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(row.t)}
+                        {chartWhen(row.t, span, false)}
                       </div>
                       <div className="mt-1 font-medium tabular-nums">
-                        {formatQty(row.c)} {unit}
+                        {side === "fiat" ? formatMoney(row.c, currency) : `${formatQty(row.c)} ${unit}`}
                       </div>
                     </div>
                   );

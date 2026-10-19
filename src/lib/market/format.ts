@@ -43,8 +43,7 @@ export function formatQty(n: number | null): string {
   if (abs >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
   if (abs >= 1_000) return (n / 1_000).toFixed(2) + "k";
   if (abs >= 1) return n.toLocaleString("en-US", { maximumFractionDigits: 3 });
-  if (abs >= 0.001) return n.toPrecision(3);
-  return n.toExponential(2);
+  return n.toLocaleString("en-US", { minimumSignificantDigits: 3, maximumSignificantDigits: 3 });
 }
 
 export function formatClock(ms: number): string {

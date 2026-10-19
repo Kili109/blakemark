@@ -34,21 +34,83 @@ function formatDay(ms: number): string {
 }
 
 const AXIS_TICK = { fill: "var(--color-muted)", fontSize: 10 };
+const HOUR = 60 * 60 * 1000;
+const DAY = 86_400_000;
 
-function axisTime(ms: number, withHour: boolean): string {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    ...(withHour ? { hour: "2-digit" as const, hourCycle: "h23" as const } : {}),
-    timeZone: "UTC",
-  }).format(ms);
+function dayLabel(ms: number): string {
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(ms);
+}
+
+function clockLabel(ms: number, withDay: boolean): string {
+  const date = new Date(ms);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  if (!withDay) return `${hh}:${mm}`;
+  return `${dayLabel(ms)}  ${hh}:${mm}`;
+}
+
+function HourTick({ x, y, payload }: { x: number; y: number; payload: { value: number } }) {
+  const date = new Date(payload.value);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return (
+    <text x={x} y={y} textAnchor="middle" fill="var(--color-muted)" fontSize={10}>
+      <tspan x={x} dy={11}>
+        {dayLabel(payload.value)}
+      </tspan>
+      <tspan x={x} dy={12}>
+        {`${hh}:${mm}`}
+      </tspan>
+    </text>
+  );
+}
+
+function spaced(latest: number, step: number, start: number, end: number): number[] {
+  return [4, 3, 2, 1, 0].map((i) => latest - i * step).filter((mark) => mark >= start && mark <= end);
+}
+
+function chartTicks(kind: "15m" | "1h" | "4h" | "1d" | "history", start: number, end: number): number[] | undefined {
+  if (kind === "15m") {
+    const latest = Math.round((Date.now() - 2 * HOUR) / (15 * 60 * 1000)) * 15 * 60 * 1000;
+    return spaced(latest, 5 * HOUR, start, end);
+  }
+  if (kind === "1h") {
+    const latest = Math.round((Date.now() - 2 * HOUR) / HOUR) * HOUR;
+    const step = Math.max(HOUR, Math.round((latest - start) / 5 / HOUR) * HOUR);
+    return spaced(latest, step, start, end);
+  }
+  if (kind === "4h") {
+    const days: number[] = [];
+    let cursor = Math.floor(Date.now() / DAY) * DAY;
+    while (days.length < 7 && cursor >= start) {
+      if (cursor <= end) days.push(cursor);
+      cursor -= DAY;
+    }
+    return days.reverse();
+  }
+  const latest = Math.round((Date.now() - 3 * DAY) / DAY) * DAY;
+  const step = Math.max(DAY, Math.round((latest - start) / 5 / DAY) * DAY);
+  const marks = spaced(latest, step, start, end);
+  return marks.length >= 2 ? marks : undefined;
 }
 
 function axisPrice(n: number, quote: QuoteCcy): string {
   if (quote === "BTC") return n >= 0.01 ? n.toFixed(4) : n.toPrecision(2);
-  if (n >= 100) return "$" + Math.round(n).toLocaleString("en-US");
-  if (n >= 1) return "$" + n.toFixed(2);
-  return "$" + n.toPrecision(2);
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+  }).format(n);
+}
+
+function axisFiat(n: number, currency: Currency): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+  }).format(n);
 }
 
 export function XbtChart({
@@ -60,7 +122,7 @@ export function XbtChart({
   currency?: Currency;
   fx?: DayClose[] | null;
 }) {
-  const [mode, setMode] = useState<"tape" | "history">("tape");
+  const [mode, setMode] = useState<"tape" | "history">("history");
   const [quote, setQuote] = useState<QuoteCcy>("USDC");
   const [interval, setInterval] = useState<(typeof INTERVALS)[number]>("1h");
   const [scale, setScale] = useState<"linear" | "log">("linear");
@@ -122,8 +184,8 @@ export function XbtChart({
         <div className="grid grid-cols-2 gap-1 rounded-full bg-raised p-1" role="group" aria-label="Chart">
           {(
             [
-              ["tape", "Tape"],
               ["history", "Historical"],
+              ["tape", "Tape"],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -196,18 +258,22 @@ export function XbtChart({
             <div className="flex h-full items-center justify-center text-sm text-muted">No data available.</div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={candles} margin={{ top: 8, right: axes ? 4 : 0, left: 0, bottom: 0 }}>
+              <AreaChart data={candles} margin={{ top: 8, right: axes ? 4 : 0, left: 0, bottom: interval === "1h" ? 18 : 0 }}>
                 <XAxis
                   dataKey="t"
                   type="number"
                   scale="time"
                   domain={[tape.data?.from ?? "dataMin", tape.data?.to ?? "dataMax"]}
                   hide={!axes}
-                  tick={AXIS_TICK}
+                  ticks={chartTicks(interval, tape.data?.from ?? candles[0]?.t ?? 0, tape.data?.to ?? candles[candles.length - 1]?.t ?? 0)}
+                  interval={0}
+                  tick={interval === "1h" ? HourTick : AXIS_TICK}
                   axisLine={{ stroke: "var(--color-line)" }}
                   tickLine={false}
-                  minTickGap={28}
-                  tickFormatter={(value: number) => axisTime(value, interval === "15m" || interval === "1h")}
+                  minTickGap={0}
+                  tickFormatter={
+                    interval === "1h" ? undefined : (value: number) => (interval === "15m" ? clockLabel(value, false) : dayLabel(value))
+                  }
                 />
                 <YAxis
                   hide={!axes}
@@ -263,11 +329,13 @@ export function XbtChart({
                 scale="time"
                 domain={["dataMin", "dataMax"]}
                 hide={!axes}
+                ticks={chartTicks("history", points[0]?.t ?? 0, points[points.length - 1]?.t ?? 0)}
+                interval={0}
                 tick={AXIS_TICK}
                 axisLine={{ stroke: "var(--color-line)" }}
                 tickLine={false}
-                minTickGap={28}
-                tickFormatter={(value: number) => axisTime(value, false)}
+                minTickGap={0}
+                tickFormatter={(value: number) => dayLabel(value)}
               />
               <YAxis
                 hide={!axes}
@@ -278,7 +346,7 @@ export function XbtChart({
                 tick={AXIS_TICK}
                 axisLine={false}
                 tickLine={false}
-                tickFormatter={(value: number) => (currency === "USD" ? axisPrice(value, "USDC") : formatMoney(value, currency))}
+                tickFormatter={(value: number) => axisFiat(value, currency)}
               />
               <Tooltip
                 cursor={{ stroke: "var(--color-line)" }}
