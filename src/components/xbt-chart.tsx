@@ -5,6 +5,7 @@ import { getMarkHistory, getXbtChart } from "@/lib/market/board.functions";
 import { formatPlain, formatUsd } from "@/lib/market/format";
 import { formatMoney, traceConvert, type Currency, type DayClose } from "@/lib/market/money";
 import type { QuoteCcy } from "@/lib/market/types";
+import { useView } from "@/lib/view-context";
 
 const QUOTES: QuoteCcy[] = ["USDC", "USDT", "BTC"];
 const INTERVALS = ["15m", "1h", "4h", "1d"] as const;
@@ -122,10 +123,11 @@ export function XbtChart({
   currency?: Currency;
   fx?: DayClose[] | null;
 }) {
-  const [mode, setMode] = useState<"tape" | "history">("history");
-  const [quote, setQuote] = useState<QuoteCcy>("USDC");
-  const [interval, setInterval] = useState<(typeof INTERVALS)[number]>("1h");
-  const [scale, setScale] = useState<"linear" | "log">("linear");
+  const { view, patch } = useView();
+  const mode = view.chartMode;
+  const quote = view.quote;
+  const interval = view.interval;
+  const scale = view.scale;
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -192,7 +194,7 @@ export function XbtChart({
               key={id}
               type="button"
               aria-pressed={mode === id}
-              onClick={() => setMode(id)}
+              onClick={() => patch({ chartMode: id })}
               className={"min-h-11 rounded-full px-2 text-sm " + (mode === id ? "bg-accent text-bg" : "text-muted")}
             >
               {label}
@@ -207,7 +209,7 @@ export function XbtChart({
                   key={item}
                   type="button"
                   aria-pressed={quote === item}
-                  onClick={() => setQuote(item)}
+                  onClick={() => patch({ quote: item })}
                   className={"min-h-11 rounded-full px-2 text-sm " + (quote === item ? "bg-accent text-bg" : "text-muted")}
                 >
                   {item}
@@ -220,7 +222,7 @@ export function XbtChart({
                   key={item}
                   type="button"
                   aria-pressed={interval === item}
-                  onClick={() => setInterval(item)}
+                  onClick={() => patch({ interval: item })}
                   className={"min-h-11 rounded-full px-2 text-sm " + (interval === item ? "bg-fg text-bg" : "text-muted")}
                 >
                   {item}
@@ -240,7 +242,7 @@ export function XbtChart({
                 key={id}
                 type="button"
                 aria-pressed={scale === id}
-                onClick={() => setScale(id)}
+                onClick={() => patch({ scale: id })}
                 className={"min-h-11 rounded-full px-2 text-sm " + (scale === id ? "bg-fg text-bg" : "text-muted")}
               >
                 {label}

@@ -9,6 +9,8 @@ import { getBoard, getFinePrices, getMarkHistory } from "@/lib/market/board.func
 import { formatClock, formatCompactUsd, formatPct, formatPlain, formatQty, tone } from "@/lib/market/format";
 import { convertSpot, CURRENCIES, formatMoney, presentAsset, traceConvert, tracedChange, tracedSpans, type Currency, type DayClose } from "@/lib/market/money";
 import { applySettings, DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as AppSettings } from "@/lib/settings";
+import { useView, ViewProvider } from "@/lib/view-context";
+import { type ChartSide } from "@/lib/view";
 import type { AssetKind, AssetRow, BestPrice, Board, CompareSpan, FinePrices, XbtBook } from "@/lib/market/types";
 
 const GROUPS: Array<{ id: AssetKind; label: string }> = [
@@ -23,8 +25,6 @@ const SPANS: Array<{ id: CompareSpan; label: string }> = [
   { id: "1w", label: "1w" },
   { id: "1m", label: "1m" },
 ];
-
-type ChartSide = "xbt" | "asset" | "fiat";
 
 function windowSeries(points: DayClose[], span: CompareSpan): DayClose[] {
   if (points.length < 2) return points;
@@ -246,6 +246,7 @@ export function Desk() {
   }, [settings]);
 
   return (
+    <ViewProvider>
     <SettingsContext.Provider value={settings}>
       <SettingsUpdate.Provider value={updateSettings}>
       <main className="mx-auto min-h-screen w-full max-w-6xl px-4 pt-4 pb-16">
@@ -259,6 +260,7 @@ export function Desk() {
             </div>
             <div className="flex shrink-0 gap-2">
               <SettingsMenu settings={settings} onChange={updateSettings} />
+              <DefaultsButton />
               <button
                 type="button"
                 onClick={() => void board.refetch()}
@@ -282,12 +284,31 @@ export function Desk() {
       </main>
       </SettingsUpdate.Provider>
     </SettingsContext.Provider>
+    </ViewProvider>
   );
 }
 
 const SATS = "bc1qsgwhrct73ag6f6ynfwqlpr2gdqy6s8vr7pwrrk";
-const APP_VERSION = "1.2.3";
+const APP_VERSION = "1.2.4";
 const RELEASES = "https://github.com/Kili109/blakemark/releases/latest";
+
+function DefaultsButton() {
+  const { reset } = useView();
+  const settings = useContext(SettingsContext);
+  const update = useContext(SettingsUpdate);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        reset();
+        if (settings.currency !== "USD") update({ ...settings, currency: "USD" });
+      }}
+      className="inline-flex min-h-11 items-center rounded-full border border-line bg-surface px-4 text-sm text-fg"
+    >
+      Defaults
+    </button>
+  );
+}
 
 function versionParts(value: string): number[] {
   return value
@@ -708,16 +729,11 @@ function Books({ books, money }: { books: XbtBook[]; money: (n: number | null) =
   );
 }
 
-type SortKey = "listed" | "performance";
-
 function Compare({ data }: { data: Board }) {
   const display = useDisplay(data);
-  const [kind, setKind] = useState<AssetKind>("fiat");
-  const [span, setSpan] = useState<CompareSpan>("1m");
-  const [sort, setSort] = useState<SortKey>("listed");
+  const { view, patch } = useView();
+  const { kind, span, sort, side } = view;
   const [query, setQuery] = useState("");
-  const [open, setOpen] = useState<string | null>(null);
-  const [side, setSide] = useState<ChartSide>("asset");
   const history = useQuery({
     queryKey: ["mark-history"],
     queryFn: () => getMarkHistory(),
@@ -774,8 +790,7 @@ function Compare({ data }: { data: Board }) {
             role="tab"
             aria-selected={kind === item.id}
             onClick={() => {
-              setKind(item.id);
-              setOpen(null);
+              patch({ kind: item.id, openTicker: null });
             }}
             className={
               "min-h-11 shrink-0 rounded-full px-4 text-sm " +
@@ -793,7 +808,7 @@ function Compare({ data }: { data: Board }) {
             key={item.id}
             type="button"
             aria-pressed={span === item.id}
-            onClick={() => setSpan(item.id)}
+            onClick={() => patch({ span: item.id })}
             className={"min-h-11 rounded-full text-sm " + (span === item.id ? "bg-fg text-bg" : "text-muted")}
           >
             {item.label}
@@ -823,7 +838,7 @@ function Compare({ data }: { data: Board }) {
               key={id}
               type="button"
               aria-pressed={sort === id}
-              onClick={() => setSort(id)}
+              onClick={() => patch({ sort: id })}
               className={"min-h-11 rounded-full px-3 text-sm " + (sort === id ? "bg-fg text-bg" : "text-muted")}
             >
               {label}
@@ -841,15 +856,15 @@ function Compare({ data }: { data: Board }) {
             currency={display.traced ? display.currency : "USD"}
             fx={display.fx}
             side={side}
-            onSide={setSide}
+            onSide={(next) => patch({ side: next })}
             series={comparisonPoints(asset, side, marks, display.fx, span, fine.data ?? null, display.traced ? display.currency : "USD").map((point) => point.c)}
             xbt={xbt}
             xbtChange={xbtChange}
             span={span}
             fine={fine.data ?? null}
             finePending={span !== "1m" && fine.isPending && !fine.data}
-            open={open === asset.ticker}
-            onToggle={() => setOpen((current) => (current === asset.ticker ? null : asset.ticker))}
+            open={view.openTicker === asset.ticker}
+            onToggle={() => patch({ openTicker: view.openTicker === asset.ticker ? null : asset.ticker })}
           />
         ))}
         {rows.length === 0 ? <li className="py-6 text-sm text-muted">Nothing matches that filter.</li> : null}
@@ -1093,8 +1108,16 @@ function PricedInXbt({
 }
 
 function Method({ books, money }: { books: XbtBook[]; money: (n: number | null) => string }) {
+  const { view, patch } = useView();
   return (
-    <details className="mt-4 border-t border-line pt-3">
+    <details
+      className="mt-4 border-t border-line pt-3"
+      open={view.notes}
+      onToggle={(event) => {
+        const notes = event.currentTarget.open;
+        if (notes !== view.notes) patch({ notes });
+      }}
+    >
       <summary className="min-h-11 text-sm font-medium">How this average is built</summary>
       <div className="grid gap-3 pb-2 text-sm text-muted">
         <p>Equal-weight counts each live book once, in dollars. Best price is the cheapest of them. Volume-weighted follows the books that traded more.</p>
