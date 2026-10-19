@@ -12,10 +12,10 @@ import { applySettings, DEFAULT_SETTINGS, loadSettings, saveSettings, type Setti
 import type { AssetKind, AssetRow, BestPrice, Board, CompareSpan, FinePrices, XbtBook } from "@/lib/market/types";
 
 const GROUPS: Array<{ id: AssetKind; label: string }> = [
-  { id: "tech", label: "Tech" },
-  { id: "crypto", label: "Crypto" },
-  { id: "fund", label: "Funds" },
   { id: "fiat", label: "Fiat" },
+  { id: "crypto", label: "Crypto" },
+  { id: "tech", label: "Tech" },
+  { id: "fund", label: "Funds" },
 ];
 
 const SPANS: Array<{ id: CompareSpan; label: string }> = [
@@ -286,7 +286,7 @@ export function Desk() {
 }
 
 const SATS = "bc1qsgwhrct73ag6f6ynfwqlpr2gdqy6s8vr7pwrrk";
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.2.2";
 const RELEASES = "https://github.com/Kili109/blakemark/releases/latest";
 
 function versionParts(value: string): number[] {
