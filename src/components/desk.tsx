@@ -286,7 +286,7 @@ export function Desk() {
 }
 
 const SATS = "bc1qsgwhrct73ag6f6ynfwqlpr2gdqy6s8vr7pwrrk";
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.2.1";
 const RELEASES = "https://github.com/Kili109/blakemark/releases/latest";
 
 function versionParts(value: string): number[] {
@@ -713,11 +713,11 @@ type SortKey = "listed" | "performance";
 function Compare({ data }: { data: Board }) {
   const display = useDisplay(data);
   const [kind, setKind] = useState<AssetKind>("tech");
-  const [span, setSpan] = useState<CompareSpan>("24h");
+  const [span, setSpan] = useState<CompareSpan>("1m");
   const [sort, setSort] = useState<SortKey>("listed");
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string | null>(null);
-  const [side, setSide] = useState<ChartSide>("xbt");
+  const [side, setSide] = useState<ChartSide>("asset");
   const history = useQuery({
     queryKey: ["mark-history"],
     queryFn: () => getMarkHistory(),
