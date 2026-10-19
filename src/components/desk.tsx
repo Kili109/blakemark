@@ -286,7 +286,7 @@ export function Desk() {
 }
 
 const SATS = "bc1qsgwhrct73ag6f6ynfwqlpr2gdqy6s8vr7pwrrk";
-const APP_VERSION = "1.2.2";
+const APP_VERSION = "1.2.3";
 const RELEASES = "https://github.com/Kili109/blakemark/releases/latest";
 
 function versionParts(value: string): number[] {
@@ -712,7 +712,7 @@ type SortKey = "listed" | "performance";
 
 function Compare({ data }: { data: Board }) {
   const display = useDisplay(data);
-  const [kind, setKind] = useState<AssetKind>("tech");
+  const [kind, setKind] = useState<AssetKind>("fiat");
   const [span, setSpan] = useState<CompareSpan>("1m");
   const [sort, setSort] = useState<SortKey>("listed");
   const [query, setQuery] = useState("");
